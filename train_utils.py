@@ -17,7 +17,8 @@ def train_multi_class_model(model : nn.Module,
                             scheduler : torch.optim.lr_scheduler.StepLR ,
                             epochs : int,
                             patience : int = 2,
-                            device : torch.device = "cpu") :
+                            device : torch.device = "cpu",
+                            model_name : str="multi_class_model"):
     model.to(device)
     
     train_losses = []
@@ -47,7 +48,7 @@ def train_multi_class_model(model : nn.Module,
             loss_value = loss(y_pred, y)
             loss_value.backward()
             clip_grad_norm_(model.parameters(), max_norm=1.0)#Gradiant clipping
-            #büyük gradiantları küçültür
+                                                            #büyük gradiantları küçültür
             optimizer.step()
             run_loss += loss_value.item() * X.size(0) # ağırlıklara göre hesap
             
@@ -88,8 +89,11 @@ def train_multi_class_model(model : nn.Module,
             best_val_loss = val_loss
             best_model_state_dict = model.state_dict()
             counter = 0
-            torch.save(best_model_state_dict, os.path.join(save_dir, "best_model.pth"))
-            
+            print("Best model updated")
+            save_path_zibab = os.path.join(save_dir, f"{model_name}_best.pth")
+            torch.save(best_model_state_dict, save_path_zibab)
+
+
         else:
             counter += 1
             if counter >= patience:
@@ -97,9 +101,154 @@ def train_multi_class_model(model : nn.Module,
                 break
     if best_model_state_dict is not None:
         model.load_state_dict(best_model_state_dict)
-        
+
+    torch.save(best_model_state_dict, os.path.join(save_dir, "best_model.pth"))
+    print("Training complete. Best model saved.")
     return train_losses, train_accuracies, test_losses, test_accuracies
-            
+
+
+
+
+def train_multi_class_one_hot(
+    model: nn.Module,
+    train_loader: DataLoader,
+    test_loader: DataLoader,
+    loss: Callable,                     # BCEWithLogitsLoss
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    epochs: int,
+    patience: int = 5,
+    device: str = "cpu",
+        model_name : str="multi_class_one_hot_model"
+):
+    model.to(device)
+
+    num_classes = model.fc.out_features  # 🔥 otomatik sınıf sayısı
+
+    train_losses, val_losses = [], []
+    train_accs, val_accs = [], []
+
+    best_val_loss = float("inf")
+    best_model_state = None
+    early_stop_counter = 0
+
+    save_dir = "models"
+    os.makedirs(save_dir, exist_ok=True)
+
+    for epoch in range(epochs):
+        # ==========================
+        # TRAIN
+        # ==========================
+        model.train()
+        running_loss = 0.0
+        running_correct = 0
+        total_samples = 0
+
+        for X, y in train_loader:
+            X = X.to(device)
+            y_int = y.long().to(device)  # (B,)
+
+            batch_size = y_int.size(0)
+            total_samples += batch_size
+
+            # ---- ONE HOT ----
+            y_onehot = torch.zeros(
+                batch_size, num_classes, device=device
+            )
+            y_onehot.scatter_(1, y_int.unsqueeze(1), 1)
+
+            optimizer.zero_grad()
+
+            logits = model(X)  # (B, C)
+
+            loss_value = loss(logits, y_onehot)
+            loss_value.backward()
+
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            running_loss += loss_value.item() * batch_size
+
+            preds = torch.argmax(logits, dim=1)
+            running_correct += (preds == y_int).sum().item()
+
+        train_loss = running_loss / total_samples
+        train_acc = running_correct / total_samples
+
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+
+        # ==========================
+        # VALIDATION
+        # ==========================
+        model.eval()
+        val_running_loss = 0.0
+        val_running_correct = 0
+        val_total = 0
+
+        with torch.no_grad():
+            for X, y in test_loader:
+                X = X.to(device)
+                y_int = y.long().to(device)
+
+                batch_size = y_int.size(0)
+                val_total += batch_size
+
+                y_onehot = torch.zeros(
+                    batch_size, num_classes, device=device
+                )
+                y_onehot.scatter_(1, y_int.unsqueeze(1), 1)
+
+                logits = model(X)
+
+                loss_value = loss(logits, y_onehot)
+                val_running_loss += loss_value.item() * batch_size
+
+                preds = torch.argmax(logits, dim=1)
+                val_running_correct += (preds == y_int).sum().item()
+
+        val_loss = val_running_loss / val_total
+        val_acc = val_running_correct / val_total
+
+        val_losses.append(val_loss)
+        val_accs.append(val_acc)
+
+        scheduler.step()
+
+        # ==========================
+        # LOG
+        # ==========================
+        print(f"Epoch [{epoch+1}/{epochs}]")
+        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}%")
+        print(f"Val   Loss: {val_loss:.4f} | Val   Acc: {val_acc*100:.2f}%")
+        print(f"LR: {scheduler.get_last_lr()[0]:.6f}")
+        print("-" * 50)
+
+        # ==========================
+        # EARLY STOPPING
+        # ==========================
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict()
+            save_path_zibab = os.path.join(save_dir, f"{model_name}_best.pth")
+            torch.save(best_model_state, save_path_zibab)
+            early_stop_counter = 0
+            print("✅ Best model updated")
+        else:
+            early_stop_counter += 1
+            if early_stop_counter >= patience:
+                print("⏹ Early stopping triggered")
+                break
+
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
+    print("🎯 Training complete. Best model loaded.")
+    return train_losses, train_accs, val_losses, val_accs
+
+
+
+
 def multi_class_acc(y_true, y_pred):
     y_pred_index = torch.argmax(y_pred, dim=1)
     acc = (y_pred_index == y_true).sum().float() / y_true.size(0)
